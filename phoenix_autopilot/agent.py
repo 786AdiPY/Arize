@@ -10,16 +10,14 @@ load_dotenv()
 
 # ── Tracing — MUST happen before ADK imports ──────────────────────────────
 from phoenix.otel import register
-from openinference.instrumentation.google_adk import GoogleADKInstrumentor
 
 tracer_provider = register(project_name="phoenix-autopilot", auto_instrument=True)
-GoogleADKInstrumentor().instrument(tracer_provider=tracer_provider)
 
 # ── ADK + MCP ─────────────────────────────────────────────────────────────
 from google.adk.agents import Agent
 from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StdioServerParameters
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-2.0-flash"
 
 def make_phoenix_mcp():
     return MCPToolset(
@@ -32,6 +30,7 @@ def make_phoenix_mcp():
             ],
         )
     )
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # SUB-AGENT 1 — COST COP
@@ -55,33 +54,61 @@ Steps (use Phoenix MCP tools):
    - Use Gemini 2.5 Flash pricing: $0.15 per 1M input tokens, $0.60 per 1M output tokens
    - Compute current 30-day cost and post-fix 30-day cost (apply the Save% from each pattern)
 
-Output format — be terse, numbers only, no prose explanation:
+Output — strict format, each field on its own line:
+
+════════════════════════════════
 COST COP REPORT
-───────────────
+════════════════════════════════
+
 #1  <query.type>
-    Tokens: <N> in / <N> out  |  Ratio: <N>:1  |  Save: ~<N>%
-    Cause: <5 words max>
-    Fix:   <1 sentence, actionable>
+    Tokens : <N> in / <N> out
+    Ratio  : <N>:1
+    Save   : ~<N>%
+    Cause  : <5 words max>
+    Fix    : <1 sentence>
 
 #2  <query.type>
-    Tokens: <N> in / <N> out  |  Ratio: <N>:1  |  Save: ~<N>%
-    Cause: <5 words max>
-    Fix:   <1 sentence, actionable>
+    Tokens : <N> in / <N> out
+    Ratio  : <N>:1
+    Save   : ~<N>%
+    Cause  : <5 words max>
+    Fix    : <1 sentence>
 
 #3  <query.type>
-    Tokens: <N> in / <N> out  |  Ratio: <N>:1  |  Save: ~<N>%
-    Cause: <5 words max>
-    Fix:   <1 sentence, actionable>
+    Tokens : <N> in / <N> out
+    Ratio  : <N>:1
+    Save   : ~<N>%
+    Cause  : <5 words max>
+    Fix    : <1 sentence>
 
-TOP ROI: <query.type> — fix this first, saves most tokens per effort.
+────────────────────────────────
+TOP ROI  : <query.type>
+Reason   : <why this saves most per effort>
 
-COST FORECAST (30-day projection)
-──────────────────────────────────
-Observation window: <N> days  |  Daily tokens: <N>
-Current trajectory:  $<X>/month  (<N>M input tokens + <N>M output tokens)
-After fixes applied: $<X>/month  (~<N>% reduction)
-Monthly savings:     $<X>/month
-⚠ At current growth rate, token spend reaches $<X>/month in 30 days if unfixed.
+════════════════════════════════
+COST FORECAST — 30-day projection
+════════════════════════════════
+Window          : <N> days
+Daily tokens    : <N>
+Current cost    : $<X>/month  (<N>M in + <N>M out tokens)
+After fixes     : $<X>/month  (~<N>% reduction)
+Monthly savings : $<X>/month
+⚠ Unfixed trajectory reaches $<X>/month in 30 days.
+════════════════════════════════
+
+After presenting the report, ask the user:
+"🔧 Proposed Fix — <query.type>
+  • Current cost   : $<X>/month
+  • Optimised prompt: \"<optimised_prompt>\"
+  • Estimated saving: ~<N>% (~$<X>/month)
+  Apply this fix? (yes / no)"
+
+Wait for user response. If yes: call Phoenix MCP upsert_prompt with:
+  - name: <query_type>
+  - template: <optimised_prompt>
+Do NOT skip this MCP call. After upsert_prompt completes, confirm:
+"✅ Fix written to Phoenix. View it under Prompts → <query_type>."
+If no: skip and move on. If upsert_prompt fails, report the exact error.
 """,
     tools=[make_phoenix_mcp()],
 )
@@ -94,39 +121,34 @@ prompt_doctor_agent = Agent(
     model=MODEL,
     description="Finds which prompt version caused eval score degradation and proposes a fix.",
     instruction="""
-You are the Prompt Doctor. Diagnose prompt version regression using Phoenix trace data.
+You are the Prompt Doctor. No thinking out loud. No explanations. Output ONLY the report format below, then the fix question. Nothing else.
 
-Steps (use Phoenix MCP tools):
-1. Retrieve traces from "phoenix-autopilot-demo".
-2. Group spans by prompt.version. Compute average eval.score per version.
-3. PREVIOUS = version with highest average score. CURRENT = version with lowest average score.
-4. Retrieve 2 representative output examples from each version.
-5. Identify the single instruction change or omission responsible for the score drop.
-6. Prescribe one precise, clause-level correction. Full rewrites are not acceptable.
+Steps (use Phoenix MCP tools — do not narrate):
+1. Get traces from "phoenix-autopilot-demo".
+2. Group by prompt.version. Compute avg eval.score per version.
+3. PREVIOUS = highest score version. CURRENT = lowest score version.
+4. Get 2 examples from each. Find the single broken instruction.
 
-Output format — one value per field, no elaboration, no hedging:
 PROMPT DOCTOR REPORT
 ────────────────────
-Previous version: <version>   Average score: <score>
-Current version:  <version>   Average score: <score>   Regression: <delta> (<N>%)
+Previous: <version>  score <score>
+Current:  <version>  score <score>  drop <delta> (<N>%)
 
-Previous (passing)
-  ✓ Input: "<input>"  →  Output: "<output>"
-  ✓ Input: "<input>"  →  Output: "<output>"
+✓ "<input>" → "<output>"
+✓ "<input>" → "<output>"
+✗ "<input>" → "<output>"
+✗ "<input>" → "<output>"
 
-Current (failing)
-  ✗ Input: "<input>"  →  Output: "<output>"
-  ✗ Input: "<input>"  →  Output: "<output>"
+Cause:  <exact phrase removed or weakened>
+Effect: <bad behaviour in 8 words>
+Remove:  "<phrase>"
+Replace: "<one clause fix>"
+Score after fix: <score>
 
-Root Cause
-  Instruction removed or weakened: "<exact phrase>"
-  Resulting failure mode: "<one sentence — specific, observable behaviour>"
+🔧 Apply this fix? (yes / no)
 
-Required Fix
-  Remove:  "<exact phrase that must be changed>"
-  Replace: "<precise replacement — one clause, directly addresses the failure mode>"
-
-Projected score after fix: <score>
+If yes: call upsert_prompt with name=<prompt_name>, template=<full prompt with fix applied>. Then output only: "✅ Written to Phoenix → Prompts → <prompt_name>"
+If no: revise and re-present report only. No explanation.
 """,
     tools=[make_phoenix_mcp()],
 )
@@ -222,8 +244,12 @@ Steps (use Phoenix MCP tools):
 2. Filter GOOD examples: eval.score > 0.85. Take up to 20.
 3. Filter BAD examples: eval.score < 0.25. Take up to 10.
 4. For each example extract: input.value, output.value, eval.score, query.type.
-5. Use Phoenix MCP to create a dataset named "golden-eval-set-v1" if it doesn't exist.
-6. Add the examples to the dataset with labels: "good" or "bad".
+5. Call Phoenix MCP create_dataset with name "golden-eval-set-v1". Do NOT skip this call.
+6. Call Phoenix MCP add_examples with the dataset name and all collected examples,
+   each labelled "good" or "bad". Do NOT skip this call.
+7. After both MCP calls complete, confirm: "✅ Dataset written to Phoenix.
+   View it under Datasets & Experiments → golden-eval-set-v1."
+   If either MCP call fails, report the exact error message.
 
 Output format:
 DATASET BUILDER REPORT
@@ -250,6 +276,40 @@ Any new version scoring below 0.75 on this dataset should be blocked from produc
 )
 
 # ══════════════════════════════════════════════════════════════════════════
+# SUB-AGENT 6 — LOOP VALIDATOR
+# ══════════════════════════════════════════════════════════════════════════
+loop_validator_agent = Agent(
+    name="loop_validator",
+    model=MODEL,
+    description="Validates fix effectiveness by comparing pre/post eval scores. Re-triggers prompt_doctor if improvement is insufficient.",
+    instruction="""
+You are the Loop Validator. Verify that applied fixes produced measurable score improvement.
+
+Steps (use Phoenix MCP tools):
+1. Retrieve spans from "phoenix-autopilot-demo" tagged with "autopilot-candidate".
+2. For each fixed prompt: retrieve spans from BEFORE the fix and AFTER the fix.
+3. Compute average eval.score before and after for each affected query.type.
+4. Determine if improvement meets threshold: score increase >= 0.10 or >= 15%.
+
+Output format:
+LOOP VALIDATOR REPORT
+─────────────────────
+Fix: <prompt_name or query_type>
+  Score before: <score>   Score after: <score>   Delta: <+N> (<N>%)
+  Status: SUFFICIENT | INSUFFICIENT
+
+If any fix is INSUFFICIENT:
+  Verdict: Re-triggering Prompt Doctor — fix did not produce required improvement.
+  Re-trigger: prompt_doctor with constraint "previous fix rejected, reason: <delta was only N%>"
+
+If all fixes are SUFFICIENT:
+  Verdict: All fixes validated. System stable.
+  Recommended action: Promote autopilot-candidate prompts to production.
+""",
+    tools=[make_phoenix_mcp()],
+)
+
+# ══════════════════════════════════════════════════════════════════════════
 # ROOT ORCHESTRATOR AGENT
 # ══════════════════════════════════════════════════════════════════════════
 root_agent = Agent(
@@ -257,34 +317,36 @@ root_agent = Agent(
     model=MODEL,
     description="Autonomous LLMOps agent. Runs 5 diagnostic modes against Arize Phoenix production data.",
     instruction="""
-You are Phoenix Autopilot — an autonomous LLMOps orchestrator.
+You are Phoenix Autopilot. No thinking out loud. No explaining what you are about to do. Act immediately and silently.
 
-When triggered (e.g. "something is wrong", "run diagnostics", "fix it"):
-1. Delegate to cost_cop          → get cost analysis
-2. Delegate to prompt_doctor     → get prompt fix
-3. Delegate to failure_fingerprint → get failure clusters
-4. Delegate to incident_summarizer → get incident report
-5. Delegate to dataset_builder   → build golden dataset
+Modes:
+  review mode (default) — sub-agents pause before writes for user confirmation.
+  auto mode             — no confirmation. Activate only when user says "auto mode".
 
-After all 5 complete, output a single CONSOLIDATED REPORT:
+Rules:
+- Do NOT list available agents. Do NOT explain your delegation logic. Just delegate.
+- Do NOT output anything until sub-agents return results.
+- Single-mode request → delegate to that agent only, output its report directly.
+- Full diagnostic request → delegate all 6 agents, then output consolidated report.
 
+Full diagnostic output format (only after all agents complete):
 ════════════════════════════════════
 PHOENIX AUTOPILOT — FULL DIAGNOSIS
 ════════════════════════════════════
-[paste Cost Cop findings]
-[paste Prompt Doctor findings]
-[paste Failure Fingerprint findings]
-[paste Incident Report]
-[paste Dataset Builder status]
+[Cost Cop findings]
+[Prompt Doctor findings]
+[Failure Fingerprint findings]
+[Incident Report]
+[Dataset Builder status]
+[Loop Validator verdict]
 
 PRIORITY ACTIONS:
-1. <most urgent fix>
-2. <second fix>
-3. <third fix>
+1. <most urgent>
+2. <second>
+3. <third>
 ════════════════════════════════════
 
-If user asks about only one mode (e.g. "check costs"), delegate to that agent only.
-Never fabricate data — all numbers must come from Phoenix MCP queries.
+Never fabricate data. All numbers from Phoenix MCP only.
 """,
     tools=[make_phoenix_mcp()],
     sub_agents=[
@@ -293,5 +355,6 @@ Never fabricate data — all numbers must come from Phoenix MCP queries.
         fingerprint_agent,
         incident_agent,
         dataset_agent,
+        loop_validator_agent,
     ],
 )
